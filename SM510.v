@@ -361,10 +361,7 @@ always @(posedge clk_32k)
         A <= Bl;
       8'b0010_????: // LAX
         A <= op[3:0];
-      8'b0001_00??, // EXC
-      8'b0001_01??, // EXCI
-      8'b0001_10??, // LDA
-      8'b0001_11??: // EXCD
+      8'b0001_????: // LDA EXC*
         A <= ram_dout;
       8'b0110_1010: // KTA
         A <= K;
@@ -404,10 +401,7 @@ always @(posedge clk_32k)
       casez (op)
         8'b0100_????: // LB
           Bm[1:0] <= op[1:0];
-        8'b0001_10??, // LDA
-        8'b0001_11??, // EXCD
-        8'b0001_01??, // EXCI
-        8'b0001_00??: // EXC
+        8'b0001_????: // LDA EXC*
           Bm[1:0] <= Bm[1:0] ^ op[1:0];
       endcase
     end
@@ -443,8 +437,7 @@ always @(posedge clk_32k)
         8'b0011_????: // ADX
           state <= alu_cy && op[3:0] != 4'hA ? SKP : FT1; // why 0xA?
         8'b0000_1001, // ADD11
-        8'b0001_11??, // EXCD
-        8'b0001_01??, // EXCI
+        8'b0001_?1??, // EXCI/D
         8'b0110_?100: // INCB DECB
           state <= alu_cy ? SKP : FT1;
         8'b0101_0001: // TB
