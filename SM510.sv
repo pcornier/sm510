@@ -1,9 +1,12 @@
-
 /* verilator lint_off CASEINCOMPLETE */
 
 module SM510(
   input rst,
   input clk,
+
+  input rom_init,
+  input [7:0] rom_init_data,
+  input [11:0] rom_init_addr,
 
   input [3:0] K, // key input ports
 
@@ -45,70 +48,78 @@ reg [14:0] div;
 reg BP;
 reg BC;
 reg Gamma; // 1s f/f
+reg tis_read; // 1s read flag
 reg ram_we;
 reg alu_cy;
 reg C;
 reg [1:0] H_clk;
 reg halt;
 
+wire f1 = div[14];
+wire f4 = div[11];
 
 wire [11:0] PC = { Pu, Pm, Pl };
 assign S = W;
 
 `ifdef VERILATOR
-  wire clk_32k = clk_cnt[5];
+  wire clk_32k = clk_cnt[3];
 `else
   wire clk_32k = clk_cnt[15]; // 32.768kHz
 `endif
 
-wire clk_64 = div[6]; // 64Hz clock = div[9]
+// reg clk_32k;
+// reg clk_32en;
 
-initial $readmemh("obj_dir/rom.txt", rom);
+// always @(posedge clk)
+// 	{ clk_32en, clk_cnt } <= clk_cnt + 24'd5498;
+
+// always @(posedge clk_32en)
+//   clk_32k <= ~clk_32k;
+
+wire clk_64 = div[8]; // 64Hz clock = div[9]
+wire clk_io = clk_cnt[4];
 
 parameter
   RST = 3'b000,
   FT1 = 3'b001,
   FT2 = 3'b010,
   FT3 = 3'b011,
-  SKP = 3'b100;
+  SKP = 3'b100,
+  SK2 = 3'b101,
+  FT4 = 3'b110;
 
 always @(posedge clk)
   clk_cnt <= clk_cnt + 16'b1;
 
-// Gamma
 always @(posedge clk)
-  if (~rst)
-    Gamma <= 1'b0;
-  else
-    if (div == 0)
-      Gamma <= 1'b1;
-    else if (state == FT1 && prev_op == 8'b0101_1000) // TIS
-      Gamma <= 1'b0;
+  if (rom_init) rom[rom_init_addr] <= rom_init_data;
+
+// Gamma
+always @(posedge clk) begin
+  if (f1) Gamma <= 1'b1;
+  else if (rst | tis_read) Gamma <= 1'b0;
+end
 
 // div
 always @(posedge clk_32k)
-  if (~rst)
-    div <= 15'b1;
+  if (f1 || rst || (op == 8'b0110_0101 && state == FT1))
+    div <= 15'b0;
   else
-    if (halt || (op == 8'b0110_0101 && state == FT2))
-      div <= 15'b0;
-    else
-      div <= div + (state == FT3 || state == SKP ? 15'd2 : 15'b1);
+    div <= div + 15'd1;
 
 // halt
 always @(posedge clk_32k)
-  if (op == 8'b0101_1101)
+  if (op == 8'b0101_1101 && state == FT1) // CEND
     halt <= 1'b1;
-  else
+  else if (f1 || K)
     halt <= 1'b0;
 
 // lcd driver
 parameter disp_ram = 7'h60;
 always @(posedge clk_64) begin
-  H_clk <= H_clk + 2'b1;
-  H <= 4'b1 << H_clk;
-
-  if (BP && ~BC)
+  if (BP & ~BC) begin
+    H_clk <= H_clk + 2'b1;
+    H <= 1'b1 << H_clk;
     segA[4'd00] <= ram[disp_ram+7'h00][H_clk];
     segA[4'd01] <= ram[disp_ram+7'h01][H_clk];
     segA[4'd02] <= ram[disp_ram+7'h02][H_clk];
@@ -125,7 +136,6 @@ always @(posedge clk_64) begin
     segA[4'd13] <= ram[disp_ram+7'h0d][H_clk];
     segA[4'd14] <= ram[disp_ram+7'h0e][H_clk];
     segA[4'd15] <= ram[disp_ram+7'h0f][H_clk];
-
     segB[4'd00] <= ram[disp_ram+7'h10][H_clk];
     segB[4'd01] <= ram[disp_ram+7'h11][H_clk];
     segB[4'd02] <= ram[disp_ram+7'h12][H_clk];
@@ -142,12 +152,14 @@ always @(posedge clk_64) begin
     segB[4'd13] <= ram[disp_ram+7'h1d][H_clk];
     segB[4'd14] <= ram[disp_ram+7'h1e][H_clk];
     segB[4'd15] <= ram[disp_ram+7'h1f][H_clk];
+  end
 end
 
 // Bs
+wire [3:0] blink = f1 ? Y : 0;
 always @(posedge clk_64)
-  if (BP && ~BC)
-    Bs <= 1'((L & ~Y) >> H_clk);
+  if (BP & ~BC)
+    Bs <= 1'((L & ~blink) >> H_clk);
 
 // rom
 always @(posedge clk)
@@ -204,11 +216,11 @@ always @* begin
 end
 
 // sbm
-always @(posedge clk_32k)
+always @*
   if (prev_op == 8'b0000_0010 && state != SKP)
-    sbm <= 1'b1;
+    sbm = 1'b1;
   else
-    sbm <= 1'b0;
+    sbm = 1'b0;
 
 // alu
 always @* begin
@@ -281,7 +293,7 @@ always @*
 
 // previous op
 always @(posedge clk_32k)
-  if (state != SKP)
+  if (state == FT2)
     prev_op <= op;
 
 // W shift register
@@ -291,7 +303,7 @@ always @(posedge clk_32k)
       W <= { W[6:0], op[0] };
 
 // I/O: BP L Y R
-always @(posedge clk_32k)
+always @(posedge clk_io)
   case (op)
     8'b0000_0001: BP <= A[0]; // ATBP
     8'b0101_1001: L <= A; // ATL
@@ -309,16 +321,16 @@ always @(posedge clk_32k)
 
 // PC & stack (PC => S => R)
 always @(posedge clk_32k)
-  if (~rst)
+  if (rst)
     { Pu, Pm, Pl } <= { 2'd3, 4'd7, 6'd0 };
+  else if (halt)
+    { Pu, Pm, Pl } <= { 2'd1, 4'd0, 6'd0 };
   else begin
     case (state)
       SKP:
         Pl <= { Pl[1] == Pl[0], Pl[5:1] };
       FT2:
         casez (op)
-          8'b0101_1101: // CEND 161, 174
-            { Pu, Pm, Pl } <= { 2'b1, 10'b0 };
           8'b0000_0011: // ATPL
             Pl[3:0] <= A;
           8'b0110_111?: begin // RTN0 RTN1
@@ -330,7 +342,6 @@ always @(posedge clk_32k)
           8'b11??_????: begin // TM
             { Ru, Rm, Rl } <= { Su, Sm, Sl };
             { Su, Sm, Sl } <= { Pu, Pm, { Pl[1] == Pl[0], Pl[5:1] } };
-            { Pu, Pl, Pm } <= { rom[12'(op[5:0])], 4'b0100 };
           end
           default:
             Pl <= { Pl[1] == Pl[0], Pl[5:1] };
@@ -344,9 +355,11 @@ always @(posedge clk_32k)
             if (prev_op[3:2] == 2'b11) begin // TML
               { Ru, Rm, Rl } <= { Su, Sm, Sl };
               { Su, Sm, Sl } <= { Pu, Pm, { Pl[1] == Pl[0], Pl[5:1] } };
-              Pm[3:2] <= 2'b0;
+              Pm <= { 2'b0, prev_op[1:0] };
             end
           end
+          8'b11??_????: // TM
+            { Pu, Pl, Pm } <= { rom[12'(op[5:0])], 4'b0100 };
           default:
             Pl <= { Pl[1] == Pl[0], Pl[5:1] };
         endcase
@@ -354,13 +367,14 @@ always @(posedge clk_32k)
   end
 
 // Acc
-always @(posedge clk_32k)
-  if (state == FT2)
+always @(posedge clk_32k) begin
+  if (state == FT1) begin
+    if (op[7:4] == 4'b0010 && op[7:4] != prev_op[7:4]) A <= op[3:0]; // LAX
+  end
+  else if (state == FT2)
     casez (op)
       8'b0000_1011: // EXBLA
         A <= Bl;
-      8'b0010_????: // LAX
-        A <= op[3:0];
       8'b0001_????: // LDA EXC*
         A <= ram_dout;
       8'b0110_1010: // KTA
@@ -370,16 +384,18 @@ always @(posedge clk_32k)
       8'b0011_????: // ADX
         A <= alu_r;
       8'b0000_1010: // COMA
-        A <= ~A;
+        A <= A ^ 4'hf;
     endcase
+end
 
 // Bl
 always @(posedge clk_32k)
   case (state)
     FT2:
       casez (op)
-        8'b0100_????: // LB
+        8'b0100_????: begin // LB
           Bl <= {  op[3]|op[2], op[3]|op[2], op[3:2] };
+        end
         8'b0000_1011: // EXBLA
           Bl <= A;
         8'b0110_?100, // INCB DECB
@@ -412,21 +428,24 @@ always @(posedge clk_32k)
       endcase
   endcase
 
+// tis_read
+always @(posedge clk_32k)
+  if (state == FT2) begin
+    if (~Gamma) tis_read <= 1'b0;
+    else if (op == 8'b0101_1000) tis_read <= 1'b1; // TIS
+  end
+
 // fsm
 always @(posedge clk_32k)
-  if (rst) begin
+  if (~rst | ~halt) begin
     state <= FT1;
-    if (state == FT1)
+    if (state == FT1) state <= FT2;
+    else if (state == SKP) state <= SK2;
+    else if (state == FT3) state <= FT4;
+    else if (state == FT2) begin
       casez (op)
-        8'b0010_????: // LAX, skip consecutive
-          state <= prev_op[7:4] == 4'b0010 ? SKP : FT2;
-        default:
-          state <= FT2;
-      endcase
-    else if (state == FT2)
-      casez (op)
-        8'b0101_1000: // TIS
-          state <= Gamma == 0 ? SKP : FT1;
+        8'b0101_1000:
+          state <= Gamma ? FT1 : SKP;
         8'b0101_1111, // LBL
         8'b0111_????: // TL TML
           state <= FT3;
@@ -435,7 +454,7 @@ always @(posedge clk_32k)
         8'b0101_0010: // TC
           state <= ~C ? SKP : FT1;
         8'b0011_????: // ADX
-          state <= alu_cy && op[3:0] != 4'hA ? SKP : FT1; // why 0xA?
+          state <= alu_cy && op[3:0] != 4'hA ? SKP : FT1;
         8'b0000_1001, // ADD11
         8'b0001_?1??, // EXCI/D
         8'b0110_?100: // INCB DECB
@@ -453,10 +472,14 @@ always @(posedge clk_32k)
         8'b0101_1110: // TAL
           state <= BA ? SKP : FT1;
         8'b0110_1000: // TF1
-          state <= div[14] ? SKP : FT1;
+          state <= f1 ? SKP : FT1;
         8'b0110_1001: // TF4
-          state <= div[11] ? SKP : FT1;
+          state <= f4 ? SKP : FT1;
+        8'b11??_????: // TM
+          state <= FT3;
       endcase
+    end
   end
+
 
 endmodule
